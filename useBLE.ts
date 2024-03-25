@@ -1,5 +1,5 @@
 /* eslint-disable no-bitwise */
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { PermissionsAndroid, Platform } from "react-native";
 import {
   BleError,
@@ -7,16 +7,20 @@ import {
   Characteristic,
   Device,
 } from "react-native-ble-plx";
+import { PERMISSIONS, requestMultiple } from "react-native-permissions";
+import DeviceInfo from "react-native-device-info";
 
-import * as ExpoDevice from "expo-device";
-
-import base64 from "react-native-base64";
+import { atob } from "react-native-quick-base64";
 
 const HEART_RATE_UUID = "0000180d-0000-1000-8000-00805f9b34fb";
 const HEART_RATE_CHARACTERISTIC = "00002a37-0000-1000-8000-00805f9b34fb";
 
+const bleManager = new BleManager();
+
+type VoidCallback = (result: boolean) => void;
+
 interface BluetoothLowEnergyApi {
-  requestPermissions(): Promise<boolean>;
+  requestPermissions(cb: VoidCallback): Promise<void>;
   scanForPeripherals(): void;
   connectToDevice: (deviceId: Device) => Promise<void>;
   disconnectFromDevice: () => void;
@@ -26,64 +30,45 @@ interface BluetoothLowEnergyApi {
 }
 
 function useBLE(): BluetoothLowEnergyApi {
-  const bleManager = useMemo(() => new BleManager(), []);
   const [allDevices, setAllDevices] = useState<Device[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
   const [heartRate, setHeartRate] = useState<number>(0);
 
-  const requestAndroid31Permissions = async () => {
-    const bluetoothScanPermission = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-      {
-        title: "Location Permission",
-        message: "Bluetooth Low Energy requires Location",
-        buttonPositive: "OK",
-      }
-    );
-    const bluetoothConnectPermission = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-      {
-        title: "Location Permission",
-        message: "Bluetooth Low Energy requires Location",
-        buttonPositive: "OK",
-      }
-    );
-    const fineLocationPermission = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-      {
-        title: "Location Permission",
-        message: "Bluetooth Low Energy requires Location",
-        buttonPositive: "OK",
-      }
-    );
-
-    return (
-      bluetoothScanPermission === "granted" &&
-      bluetoothConnectPermission === "granted" &&
-      fineLocationPermission === "granted"
-    );
-  };
-
-  const requestPermissions = async () => {
+  const requestPermissions = async (cb: VoidCallback) => {
     if (Platform.OS === "android") {
-      if ((ExpoDevice.platformApiLevel ?? -1) < 31) {
+      const apiLevel = await DeviceInfo.getApiLevel();
+
+      if (apiLevel < 31) {
         const granted = await PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
           {
             title: "Location Permission",
             message: "Bluetooth Low Energy requires Location",
+            buttonNeutral: "Ask Later",
+            buttonNegative: "Cancel",
             buttonPositive: "OK",
           }
         );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
+        cb(granted === PermissionsAndroid.RESULTS.GRANTED);
       } else {
-        const isAndroid31PermissionsGranted =
-          await requestAndroid31Permissions();
+        const result = await requestMultiple([
+          PERMISSIONS.ANDROID.BLUETOOTH_SCAN,
+          PERMISSIONS.ANDROID.BLUETOOTH_CONNECT,
+          PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION,
+        ]);
 
-        return isAndroid31PermissionsGranted;
+        const isGranted =
+          result["android.permission.BLUETOOTH_CONNECT"] ===
+            PermissionsAndroid.RESULTS.GRANTED &&
+          result["android.permission.BLUETOOTH_SCAN"] ===
+            PermissionsAndroid.RESULTS.GRANTED &&
+          result["android.permission.ACCESS_FINE_LOCATION"] ===
+            PermissionsAndroid.RESULTS.GRANTED;
+
+        cb(isGranted);
       }
     } else {
-      return true;
+      cb(true);
     }
   };
 
@@ -137,7 +122,7 @@ function useBLE(): BluetoothLowEnergyApi {
       return -1;
     }
 
-    const rawData = base64.decode(characteristic.value);
+    const rawData = atob(characteristic.value);
     let innerHeartRate: number = -1;
 
     const firstBitValue: number = Number(rawData) & 0x01;
@@ -158,7 +143,7 @@ function useBLE(): BluetoothLowEnergyApi {
       device.monitorCharacteristicForService(
         HEART_RATE_UUID,
         HEART_RATE_CHARACTERISTIC,
-        onHeartRateUpdate
+        (error, characteristic) => onHeartRateUpdate(error, characteristic)
       );
     } else {
       console.log("No Device Connected");
